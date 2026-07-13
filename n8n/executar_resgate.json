@@ -1,0 +1,803 @@
+{
+  "name": "Kommo executar resgate - modelo higienizado",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nfunction toBool(value) {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'number') return value !== 0;\n  if (typeof value === 'string') {\n    const v = normalizeText(value);\n    return ['1', 'true', 'yes', 'sim', 'on'].includes(v);\n  }\n  return false;\n}\n\nfunction ms(value) {\n  if (!value) return null;\n  const d = new Date(value);\n  const t = d.getTime();\n  return Number.isFinite(t) ? t : null;\n}\n\nconst state = $json;\nconst nowMs = Date.now();\nconst gateHours = 72;\nconst gateMs = gateHours * 60 * 60 * 1000;\n\nconst currentLastMessageAtMs = ms(state.current_last_message_at);\nconst queueGateMs = ms(state.not_before_at);\nconst computedGateMs = currentLastMessageAtMs ? (currentLastMessageAtMs + gateMs) : null;\n\nconst effectiveGateMs = [queueGateMs, computedGateMs]\n  .filter((v) => Number.isFinite(v))\n  .reduce((max, v) => Math.max(max, v), 0) || null;\n\nconst hoursSinceLastMessage = currentLastMessageAtMs\n  ? (nowMs - currentLastMessageAtMs) / 36e5\n  : null;\n\nconst hoursUntilGateOpen = effectiveGateMs\n  ? Math.max(0, (effectiveGateMs - nowMs) / 36e5)\n  : null;\n\nconst snapshotMatches =\n  (!state.last_message_id || String(state.last_message_id) === String(state.current_last_message_id ?? '')) &&\n  (!state.last_message_hash || String(state.last_message_hash) === String(state.current_last_message_hash ?? '')) &&\n  (!state.last_message_actor || normalizeText(state.last_message_actor) === normalizeText(state.current_last_message_actor ?? '')) &&\n  (!state.snapshot_last_stage_name || normalizeText(state.snapshot_last_stage_name) === normalizeText(state.current_stage_name ?? ''));\n\nconst closedLike = Boolean(state.is_closed);\nconst hasHuman = Array.isArray(state.tags) && state.tags.some((t) =>\n  normalizeText(t).includes('atendimento_humano') ||\n  normalizeText(t).includes('humano') ||\n  normalizeText(t).includes('consultora')\n);\n\nconst hasDone = Array.isArray(state.tags) && state.tags.some((t) =>\n  normalizeText(t).includes('resgate_cancelado') ||\n  normalizeText(t).includes('resgate_concluido')\n);\n\nlet should_execute_now = false;\nlet should_reschedule = false;\nlet should_cancel = false;\n\nlet cancel_reason = null;\nlet reschedule_reason = null;\n\nif (!state.lead_id) {\n  should_cancel = true;\n  cancel_reason = 'missing_lead_id';\n} else if (closedLike) {\n  should_cancel = true;\n  cancel_reason = 'closed';\n} else if (hasHuman) {\n  should_cancel = true;\n  cancel_reason = 'human_handling';\n} else if (hasDone) {\n  should_cancel = true;\n  cancel_reason = 'already_finished';\n} else if (Number(state.current_status_id ?? 0) !== Number(state.snapshot_status_id ?? state.status_id ?? 0)) {\n  should_cancel = true;\n  cancel_reason = 'stage_changed';\n} else if (Number(state.pipeline_id ?? 0) !== Number(state.queue_pipeline_id ?? 0)) {\n  should_cancel = true;\n  cancel_reason = 'pipeline_changed';\n} else if (!currentLastMessageAtMs) {\n  should_cancel = true;\n  cancel_reason = 'missing_last_message';\n} else if (!effectiveGateMs || nowMs < effectiveGateMs) {\n  should_reschedule = true;\n  reschedule_reason = 'recent_message';\n} else if (!snapshotMatches) {\n  should_reschedule = true;\n  reschedule_reason = 'snapshot_changed';\n} else {\n  should_execute_now = true;\n}\n\nconst nextExecuteAtMs = should_reschedule\n  ? (effectiveGateMs ?? (currentLastMessageAtMs + gateMs))\n  : null;\n\nconst nextExecuteAt = nextExecuteAtMs ? new Date(nextExecuteAtMs).toISOString() : null;\n\nreturn [{\n  json: {\n    ...state,\n    should_execute_now,\n    should_reschedule,\n    should_cancel,\n    decision: should_execute_now ? 'execute' : (should_reschedule ? 'reschedule' : 'cancel'),\n    cancel_reason,\n    reschedule_reason,\n    next_execute_at: nextExecuteAt,\n    next_not_before_at: nextExecuteAt,\n    hours_since_last_message: hoursSinceLastMessage,\n    hours_until_gate_open: hoursUntilGateOpen,\n    snapshot_matches: snapshotMatches,\n    effective_gate_at: effectiveGateMs ? new Date(effectiveGateMs).toISOString() : null,\n    time_gate_open: Boolean(effectiveGateMs && nowMs >= effectiveGateMs),\n  },\n}];"
+      },
+      "name": "Valida Janela e Snapshot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1568,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !!$json.should_execute_now }}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "IF Pode Executar",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1344,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ !!$json.should_reschedule }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "IF Deve Reagendar",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1120,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nfunction sql(value) {\n  if (value === null || value === undefined || value === '') return 'NULL';\n  return `'${String(value).replace(/'/g, \"''\")}'`;\n}\n\nfunction sqlTz(value) {\n  const q = sql(value);\n  return q === 'NULL' ? 'NULL' : `${q}::timestamptz`;\n}\n\nfunction sqlNum(value) {\n  const n = Number(value);\n  return Number.isFinite(n) ? String(n) : 'NULL';\n}\n\nconst row = $json;\nconst rescheduleAt = row.next_execute_at || row.next_not_before_at || row.effective_gate_at || null;\nconst nextReason = row.reschedule_reason || 'recent_message';\n\nconst sqlInsertHistory = `\nINSERT INTO public.rescue_history (\n  queue_key,\n  lead_id,\n  attempt,\n  action,\n  result,\n  details,\n  last_message_id,\n  last_message_at,\n  last_message_actor,\n  last_message_hash,\n  not_before_at,\n  snapshot_last_stage_name,\n  snapshot_status_id,\n  created_at\n) VALUES (\n  ${sql(row.queue_key)},\n  ${sqlNum(row.lead_id)},\n  ${sqlNum(row.attempt)},\n  'rescheduled',\n  'pending',\n  ${sql(`reason=${nextReason} | next_execute_at=${rescheduleAt || 'null'} | hours_until_gate_open=${row.hours_until_gate_open ?? 'null'}`)},\n  ${sql(row.current_last_message_id ?? row.last_message_id)},\n  ${sqlTz(row.current_last_message_at ?? row.last_message_at)},\n  ${sql(row.current_last_message_actor ?? row.last_message_actor)},\n  ${sql(row.current_last_message_hash ?? row.last_message_hash)},\n  ${sqlTz(rescheduleAt)},\n  ${sql(row.current_stage_name ?? row.snapshot_last_stage_name ?? row.last_stage_name ?? '')},\n  ${sqlNum(row.current_status_id ?? row.snapshot_status_id ?? row.status_id)},\n  NOW()\n);\n`.trim();\n\nconst sqlUpdateQueue = `\nUPDATE public.rescue_queue\nSET\n  status = 'pending',\n  execute_at = ${sqlTz(rescheduleAt)},\n  not_before_at = ${sqlTz(rescheduleAt)},\n  block_reason = ${sql(nextReason)},\n  last_event_type = 'rescue_rescheduled',\n  last_stage_name = ${sql(row.current_stage_name ?? row.snapshot_last_stage_name ?? row.last_stage_name ?? '')},\n  last_message_id = ${sql(row.current_last_message_id ?? row.last_message_id)},\n  last_message_at = ${sqlTz(row.current_last_message_at ?? row.last_message_at)},\n  last_message_actor = ${sql(row.current_last_message_actor ?? row.last_message_actor)},\n  last_message_hash = ${sql(row.current_last_message_hash ?? row.last_message_hash)},\n  snapshot_last_stage_name = ${sql(row.current_stage_name ?? row.snapshot_last_stage_name ?? row.last_stage_name ?? '')},\n  snapshot_status_id = ${sqlNum(row.current_status_id ?? row.snapshot_status_id ?? row.status_id)},\n  updated_at = NOW()\nWHERE queue_key = ${sql(row.queue_key)};\n`.trim();\n\nreturn [{\n  json: {\n    ...row,\n    reschedule_at: rescheduleAt,\n    sql_insert_history_rescheduled: sqlInsertHistory,\n    sql_update_queue_rescheduled: sqlUpdateQueue,\n  },\n}];"
+      },
+      "name": "Compoe Reschedule Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        976
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Reschedule Action').first().json.sql_insert_history_rescheduled }}",
+        "options": {}
+      },
+      "name": "Insert Rescue History - Rescheduled",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -672,
+        976
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Reschedule Action').first().json.sql_update_queue_rescheduled }}",
+        "options": {}
+      },
+      "name": "Update Rescue Queue - Rescheduled",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -448,
+        976
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyHour"
+            }
+          ]
+        }
+      },
+      "name": "Cron Busca Resgates",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        -3584,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS public.rescue_queue (\n  queue_key TEXT PRIMARY KEY,\n  lead_id BIGINT NOT NULL,\n  pipeline_id BIGINT,\n  status_id BIGINT,\n  rescue_type TEXT NOT NULL,\n  rescue_label TEXT NOT NULL,\n  wait_hours INTEGER NOT NULL DEFAULT 24,\n  max_attempts INTEGER NOT NULL DEFAULT 2,\n  attempt INTEGER NOT NULL DEFAULT 0,\n  execute_at TIMESTAMPTZ,\n  not_before_at TIMESTAMPTZ,\n  status TEXT NOT NULL DEFAULT 'pending',\n  block_reason TEXT,\n  last_event_type TEXT,\n  last_stage_name TEXT,\n  last_message_id TEXT,\n  last_message_at TIMESTAMPTZ,\n  last_message_actor TEXT,\n  last_message_hash TEXT,\n  snapshot_last_stage_name TEXT,\n  snapshot_status_id BIGINT,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS not_before_at TIMESTAMPTZ;\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_id TEXT;\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_actor TEXT;\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_hash TEXT;\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS snapshot_last_stage_name TEXT;\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS snapshot_status_id BIGINT;\n\nCREATE INDEX IF NOT EXISTS idx_rescue_queue_status_execute_at\n  ON public.rescue_queue(status, execute_at, not_before_at);\n\nCREATE TABLE IF NOT EXISTS public.rescue_history (\n  id BIGSERIAL PRIMARY KEY,\n  queue_key TEXT NOT NULL,\n  lead_id BIGINT NOT NULL,\n  attempt INTEGER NOT NULL,\n  action TEXT NOT NULL,\n  result TEXT NOT NULL,\n  details TEXT,\n  last_message_id TEXT,\n  last_message_at TIMESTAMPTZ,\n  last_message_actor TEXT,\n  last_message_hash TEXT,\n  not_before_at TIMESTAMPTZ,\n  snapshot_last_stage_name TEXT,\n  snapshot_status_id BIGINT,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nALTER TABLE public.rescue_history\n  ADD COLUMN IF NOT EXISTS last_message_id TEXT;\nALTER TABLE public.rescue_history\n  ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;\nALTER TABLE public.rescue_history\n  ADD COLUMN IF NOT EXISTS last_message_actor TEXT;\nALTER TABLE public.rescue_history\n  ADD COLUMN IF NOT EXISTS last_message_hash TEXT;\nALTER TABLE public.rescue_history\n  ADD COLUMN IF NOT EXISTS not_before_at TIMESTAMPTZ;\nALTER TABLE public.rescue_history\n  ADD COLUMN IF NOT EXISTS snapshot_last_stage_name TEXT;\nALTER TABLE public.rescue_history\n  ADD COLUMN IF NOT EXISTS snapshot_status_id BIGINT;\n\nCREATE INDEX IF NOT EXISTS idx_rescue_history_queue_key\n  ON public.rescue_history(queue_key);",
+        "options": {}
+      },
+      "name": "Bootstrap Tables",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2912,
+        1168
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.rescue_queue\nWHERE status = 'pending'\n  AND execute_at <= NOW()\n  AND COALESCE(not_before_at, execute_at) <= NOW()\n  AND attempt < max_attempts\nORDER BY GREATEST(execute_at, COALESCE(not_before_at, execute_at)) ASC\nLIMIT 100;",
+        "options": {}
+      },
+      "name": "Get Due Rescue Queue",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2688,
+        1168
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -2464,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://SEU_SUBDOMINIO_KOMMO.kommo.com' + '/api/v4/leads/' + $json.lead_id + '?with=contacts' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer SEU_ACCESS_TOKEN_KOMMO"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Pega Lead do Kommo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2240,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://SEU_SUBDOMINIO_KOMMO.kommo.com' + '/api/v4/leads/pipelines/' + $json.pipeline_id + '/statuses?with=descriptions' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer SEU_ACCESS_TOKEN_KOMMO"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Pega Pipeline Statuses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2016,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nfunction parseMaybeJson(value) {\n  if (!value) return {};\n\n  if (typeof value === 'string') {\n    try {\n      return JSON.parse(value);\n    } catch {\n      return {};\n    }\n  }\n\n  if (\n    typeof value === 'object' &&\n    value.data &&\n    typeof value.data === 'string'\n  ) {\n    try {\n      return JSON.parse(value.data);\n    } catch {\n      return value;\n    }\n  }\n\n  return value;\n}\n\nfunction extractTags(src) {\n  const raw = src?._embedded?.tags ?? src?.tags ?? [];\n  const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);\n\n  return list\n    .map((t) => normalizeText(t?.name ?? t?.title ?? t?.tag_name ?? t))\n    .filter(Boolean);\n}\n\nfunction getCustomFieldValue(src, names) {\n  const wanted = Array.isArray(names)\n    ? names.map(normalizeText)\n    : [normalizeText(names)];\n\n  const fields = Array.isArray(src?.custom_fields_values)\n    ? src.custom_fields_values\n    : [];\n\n  for (const field of fields) {\n    const fieldName = normalizeText(\n      field?.field_name ?? field?.field_code ?? ''\n    );\n\n    if (wanted.some((n) => fieldName.includes(n))) {\n      const rawValue = Array.isArray(field?.values)\n        ? field.values[0]?.value\n        : field?.value;\n\n      return rawValue ?? null;\n    }\n  }\n\n  return null;\n}\n\nfunction toBool(value) {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'number') return value !== 0;\n\n  if (typeof value === 'string') {\n    return ['1', 'true', 'yes', 'sim', 'on'].includes(\n      normalizeText(value)\n    );\n  }\n\n  return false;\n}\n\nfunction simpleHash(text) {\n  const s = normalizeText(text);\n\n  let hash = 0;\n\n  for (let i = 0; i < s.length; i++) {\n    hash = Math.imul(31, hash) + s.charCodeAt(i) | 0;\n  }\n\n  return (hash >>> 0).toString(16);\n}\n\n/* ===================================================================== */\n/* FONTES DE DADOS                                                       */\n/* ===================================================================== */\n\nconst queue = $items(\"loop data\")[0].json;\n\nconst leadRaw = parseMaybeJson(\n  $items(\"Pega Lead do Kommo\")[0].json\n);\n\nconst statusesRaw = parseMaybeJson(\n  $items(\"Pega Pipeline Statuses\")[0].json\n);\n\n/* ===================================================================== */\n\nconst lead =\n  leadRaw?.data && typeof leadRaw.data === 'object'\n    ? leadRaw.data\n    : leadRaw;\n\nconst statusesContainer =\n  statusesRaw?.data && typeof statusesRaw.data === 'object'\n    ? statusesRaw.data\n    : statusesRaw;\n\nconst statuses = Array.isArray(statusesContainer)\n  ? statusesContainer\n  : statusesContainer?._embedded?.statuses ??\n    statusesContainer?.statuses ??\n    [];\n\n/* ===================================================================== */\n/* ESTADO ATUAL DO LEAD                                                  */\n/* ===================================================================== */\n\nconst currentLeadId =\n  Number(lead?.id ?? queue.lead_id ?? 0) || null;\n\nconst currentPipelineId =\n  Number(lead?.pipeline_id ?? queue.pipeline_id ?? 0) || null;\n\nconst currentStatusId =\n  Number(lead?.status_id ?? queue.status_id ?? 0) || null;\n\nconst statusMatch =\n  statuses.find(\n    (s) =>\n      Number(s?.id ?? s?.status_id ?? 0) === currentStatusId\n  ) ?? null;\n\nconst currentStageName =\n  statusMatch?.name ??\n  lead?.status_name ??\n  queue.last_stage_name ??\n  '';\n\n/* ===================================================================== */\n\nconst tags = extractTags(lead);\n\nconst customLastMessageText = String(\n  getCustomFieldValue(\n    lead,\n    [\n      'ultima msg',\n      'ultima mensagem',\n      'última msg',\n      'última mensagem',\n    ]\n  ) ?? ''\n);\n\nconst customAiMessageText = String(\n  getCustomFieldValue(\n    lead,\n    ['mensagem ia', 'mensagem ai']\n  ) ?? ''\n);\n\nconst rawPararIa = getCustomFieldValue(\n  lead,\n  ['parar ia']\n);\n\nconst pararIa = toBool(rawPararIa);\n\n/* ===================================================================== */\n\nconst currentLastMessageText =\n  customLastMessageText || customAiMessageText || '';\n\nconst currentLastMessageHash = simpleHash(\n  currentLastMessageText ||\n    currentStageName ||\n    String(currentStatusId ?? '')\n);\n\nconst currentLastMessageId = lead?.updated_at\n  ? String(lead.updated_at)\n  : null;\n\nconst currentLastMessageAt = lead?.updated_at\n  ? new Date(Number(lead.updated_at) * 1000).toISOString()\n  : null;\n\n/* ===================================================================== */\n\nlet currentLastMessageActor = 'lead';\n\nif (\n  currentLastMessageText &&\n  customAiMessageText &&\n  normalizeText(currentLastMessageText) ===\n    normalizeText(customAiMessageText)\n) {\n  currentLastMessageActor = 'ia';\n} else if (pararIa) {\n  currentLastMessageActor = 'human';\n} else if (\n  tags.some((t) => t.includes('em atendimento ia'))\n) {\n  currentLastMessageActor = 'ia';\n}\n\n/* ===================================================================== */\n\nconst closedLike =\n  /vendid|vendido|fechad|perdid|cancelad|arquivad|encerrad/i.test(\n    normalizeText(currentStageName)\n  );\n\nconst isClosed =\n  Boolean(lead?.is_deleted) ||\n  Boolean(lead?.closed_at) ||\n  closedLike;\n\n/* ===================================================================== */\n\nreturn [\n  {\n    json: {\n      phase: 'before_wait',\n\n      /* ============================================================= */\n      /* Snapshot salvo na fila                                        */\n      /* ============================================================= */\n\n      queue_key: queue.queue_key ?? null,\n      attempt: Number(queue.attempt ?? 0),\n\n      execute_at: queue.execute_at ?? null,\n      not_before_at: queue.not_before_at ?? null,\n\n      block_reason: queue.block_reason ?? null,\n\n      last_event_type: queue.last_event_type ?? null,\n\n      last_stage_name: queue.last_stage_name ?? '',\n\n      snapshot_last_stage_name:\n        queue.snapshot_last_stage_name ??\n        queue.last_stage_name ??\n        '',\n\n      snapshot_status_id:\n        Number(\n          queue.snapshot_status_id ??\n            queue.status_id ??\n            0\n        ) || null,\n\n      last_message_id:\n        queue.last_message_id ?? null,\n\n      last_message_at:\n        queue.last_message_at ?? null,\n\n      last_message_actor:\n        queue.last_message_actor ?? null,\n\n      last_message_hash:\n        queue.last_message_hash ?? null,\n\n      queue_pipeline_id:\n        Number(queue.pipeline_id ?? 0) || null,\n\n      queue_status_id:\n        Number(queue.status_id ?? 0) || null,\n\n      rescue_type:\n        queue.rescue_type ?? null,\n\n      rescue_label:\n        queue.rescue_label ?? null,\n\n      wait_hours:\n        Number(queue.wait_hours ?? 0),\n\n      max_attempts:\n        Number(queue.max_attempts ?? 1),\n\n      /* ============================================================= */\n      /* Estado atual do Kommo                                         */\n      /* ============================================================= */\n\n      lead_id: currentLeadId,\n\n      lead_name:\n        lead?.name ?? '',\n\n      pipeline_id:\n        currentPipelineId,\n\n      current_status_id:\n        currentStatusId,\n\n      current_stage_name:\n        currentStageName,\n\n      trigger_status_id: null,\n      trigger_stage_name: '',\n\n      event_type:\n        queue.last_event_type ??\n        'cron',\n\n      tags,\n\n      is_closed: isClosed,\n\n      closed_like:\n        closedLike,\n\n      updated_at:\n        lead?.updated_at ?? null,\n\n      pending_lock: null,\n\n      /* ============================================================= */\n      /* Snapshot atual da conversa                                    */\n      /* ============================================================= */\n\n      current_last_message_id:\n        currentLastMessageId,\n\n      current_last_message_at:\n        currentLastMessageAt,\n\n      current_last_message_actor:\n        currentLastMessageActor,\n\n      current_last_message_hash:\n        currentLastMessageHash,\n\n      current_last_message_text:\n        currentLastMessageText,\n\n      current_ai_message_text:\n        customAiMessageText || null,\n\n      current_parar_ia:\n        pararIa,\n\n      current_last_message_signature:\n        `${currentLastMessageActor}:${currentLastMessageHash}`,\n\n      /* ============================================================= */\n\n      lead_full: lead,\n\n      pipeline_statuses:\n        statuses,\n\n      received_at: null,\n\n      raw_event: 'cron',\n    },\n  },\n];"
+      },
+      "name": "Reconstroi Estado Atual",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1792,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nfunction sql(value) {\n  if (value === null || value === undefined || value === '') return 'NULL';\n  return `'${String(value).replace(/'/g, \"''\")}'`;\n}\n\nfunction sqlTz(value) {\n  const q = sql(value);\n  return q === 'NULL' ? 'NULL' : `${q}::timestamptz`;\n}\n\nfunction sqlNum(value) {\n  const n = Number(value);\n  return Number.isFinite(n) ? String(n) : 'NULL';\n}\n\nconst state = $json;\nconst rescueTypeUpper = normalizeText(state.rescue_type || 'general')\n  .replace(/[^a-z0-9]+/g, '_')\n  .replace(/^_|_$/g, '')\n  .toUpperCase() || 'GENERAL';\n\nconst currentAttempt = Math.max(1, Number(state.attempt || 0) + 1);\nconst canRetry = currentAttempt < Math.max(1, Number(state.max_attempts || 1));\nconst nextExecuteAt = canRetry\n  ? new Date(Date.now() + Math.max(1, Number(state.wait_hours || 1)) * 60 * 60 * 1000).toISOString()\n  : null;\n\nconst patchBody = {\n  updated_by: 0,\n  tags_to_add: [\n    { name: 'RESGATE_EM_EXECUCAO' },\n    { name: `RESGATE_EM_EXECUCAO_${rescueTypeUpper}` },\n    { name: `RESGATE_TENTATIVA_${currentAttempt}` },\n  ],\n  tags_to_delete: [\n    { name: 'RESGATE_PENDENTE' },\n    { name: `RESGATE_PENDENTE_${rescueTypeUpper}` },\n  ],\n};\n\nconst sqlInsertHistory = `\nINSERT INTO public.rescue_history (\n  queue_key,\n  lead_id,\n  attempt,\n  action,\n  result,\n  details,\n  last_message_id,\n  last_message_at,\n  last_message_actor,\n  last_message_hash,\n  not_before_at,\n  snapshot_last_stage_name,\n  snapshot_status_id,\n  created_at\n) VALUES (\n  ${sql(state.queue_key)},\n  ${sqlNum(state.lead_id)},\n  ${currentAttempt},\n  'dispatch',\n  'sent',\n  ${sql(`executed_at=${new Date().toISOString()} | next_execute_at=${nextExecuteAt || 'none'} | rescue_type=${state.rescue_type}`)},\n  ${sql(state.current_last_message_id ?? state.last_message_id)},\n  ${sqlTz(state.current_last_message_at ?? state.last_message_at)},\n  ${sql(state.current_last_message_actor ?? state.last_message_actor)},\n  ${sql(state.current_last_message_hash ?? state.last_message_hash)},\n  ${sqlTz(nextExecuteAt)},\n  ${sql(state.current_stage_name ?? state.snapshot_last_stage_name ?? state.last_stage_name ?? '')},\n  ${sqlNum(state.current_status_id ?? state.snapshot_status_id ?? state.status_id)},\n  NOW()\n);\n`.trim();\n\nconst sqlUpdateQueue = `\nUPDATE public.rescue_queue\nSET\n  attempt = ${currentAttempt},\n  status = ${sql(canRetry ? 'pending' : 'exhausted')},\n  execute_at = ${sqlTz(nextExecuteAt)},\n  not_before_at = ${sqlTz(nextExecuteAt)},\n  block_reason = NULL,\n  last_event_type = ${sql('rescue_dispatched')},\n  last_stage_name = ${sql(state.current_stage_name ?? state.snapshot_last_stage_name ?? state.last_stage_name ?? '')},\n  last_message_id = ${sql(state.current_last_message_id ?? state.last_message_id)},\n  last_message_at = ${sqlTz(state.current_last_message_at ?? state.last_message_at)},\n  last_message_actor = ${sql(state.current_last_message_actor ?? state.last_message_actor)},\n  last_message_hash = ${sql(state.current_last_message_hash ?? state.last_message_hash)},\n  snapshot_last_stage_name = ${sql(state.current_stage_name ?? state.snapshot_last_stage_name ?? state.last_stage_name ?? '')},\n  snapshot_status_id = ${sqlNum(state.current_status_id ?? state.snapshot_status_id ?? state.status_id)},\n  updated_at = NOW()\nWHERE queue_key = ${sql(state.queue_key)};\n`.trim();\n\nreturn [{\n  json: {\n    ...state,\n    attempt_now: currentAttempt,\n    next_execute_at: nextExecuteAt,\n    next_status: canRetry ? 'pending' : 'exhausted',\n    patch_body: patchBody,\n    sql_insert_history_dispatched: sqlInsertHistory,\n    sql_update_queue_dispatched: sqlUpdateQueue,\n  },\n}];"
+      },
+      "name": "Compoe Execution Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://SEU_SUBDOMINIO_KOMMO.kommo.com' + '/api/v4/leads/' + $('Compoe Execution Action').first().json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer SEU_ACCESS_TOKEN_KOMMO"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Compoe Execution Action').first().json.patch_body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Patch Lead Execute",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -896,
+        592
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Execution Action').first().json.sql_insert_history_dispatched }}",
+        "options": {}
+      },
+      "name": "Insert Rescue History - Dispatched",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -672,
+        592
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Execution Action').first().json.sql_update_queue_dispatched }}",
+        "options": {}
+      },
+      "name": "Update Rescue Queue - Dispatched",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -448,
+        592
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nfunction sql(value) {\n  if (value === null || value === undefined || value === '') return 'NULL';\n  return `'${String(value).replace(/'/g, \"''\")}'`;\n}\n\nfunction sqlTz(value) {\n  const q = sql(value);\n  return q === 'NULL' ? 'NULL' : `${q}::timestamptz`;\n}\n\nfunction sqlNum(value) {\n  const n = Number(value);\n  return Number.isFinite(n) ? String(n) : 'NULL';\n}\n\nconst state = $json;\nconst rescueTypeUpper = normalizeText(state.rescue_type || 'general')\n  .replace(/[^a-z0-9]+/g, '_')\n  .replace(/^_|_$/g, '')\n  .toUpperCase() || 'GENERAL';\n\nconst patchBody = {\n  updated_by: 0,\n  tags_to_add: [\n    { name: 'RESGATE_CANCELADO' },\n    { name: `RESGATE_CANCELADO_${rescueTypeUpper}` },\n  ],\n  tags_to_delete: [\n    { name: 'RESGATE_PENDENTE' },\n    { name: `RESGATE_PENDENTE_${rescueTypeUpper}` },\n    { name: `RESGATE_EM_EXECUCAO_${rescueTypeUpper}` },\n  ],\n};\n\nconst sqlInsertHistory = `\nINSERT INTO public.rescue_history (\n  queue_key,\n  lead_id,\n  attempt,\n  action,\n  result,\n  details,\n  last_message_id,\n  last_message_at,\n  last_message_actor,\n  last_message_hash,\n  not_before_at,\n  snapshot_last_stage_name,\n  snapshot_status_id,\n  created_at\n) VALUES (\n  ${sql(state.queue_key)},\n  ${sqlNum(state.lead_id)},\n  ${sqlNum(Number(state.attempt || 0))},\n  'cancelled',\n  'cancelled',\n  ${sql(state.cancel_reason || state.block_reason || 'not_eligible')},\n  ${sql(state.current_last_message_id ?? state.last_message_id)},\n  ${sqlTz(state.current_last_message_at ?? state.last_message_at)},\n  ${sql(state.current_last_message_actor ?? state.last_message_actor)},\n  ${sql(state.current_last_message_hash ?? state.last_message_hash)},\n  ${sqlTz(state.next_not_before_at ?? state.not_before_at)},\n  ${sql(state.current_stage_name ?? state.snapshot_last_stage_name ?? state.last_stage_name ?? '')},\n  ${sqlNum(state.current_status_id ?? state.snapshot_status_id ?? state.status_id)},\n  NOW()\n);\n`.trim();\n\nconst sqlCancelQueue = `\nUPDATE public.rescue_queue\nSET\n  status = 'cancelled',\n  execute_at = NULL,\n  not_before_at = NULL,\n  block_reason = ${sql(state.cancel_reason || state.block_reason || 'not_eligible')},\n  last_event_type = ${sql('rescue_cancelled')},\n  last_stage_name = ${sql(state.current_stage_name ?? state.snapshot_last_stage_name ?? state.last_stage_name ?? '')},\n  last_message_id = ${sql(state.current_last_message_id ?? state.last_message_id)},\n  last_message_at = ${sqlTz(state.current_last_message_at ?? state.last_message_at)},\n  last_message_actor = ${sql(state.current_last_message_actor ?? state.last_message_actor)},\n  last_message_hash = ${sql(state.current_last_message_hash ?? state.last_message_hash)},\n  snapshot_last_stage_name = ${sql(state.current_stage_name ?? state.snapshot_last_stage_name ?? state.last_stage_name ?? '')},\n  snapshot_status_id = ${sqlNum(state.current_status_id ?? state.snapshot_status_id ?? state.status_id)},\n  updated_at = NOW()\nWHERE queue_key = ${sql(state.queue_key)};\n`.trim();\n\nreturn [{\n  json: {\n    ...state,\n    patch_body: patchBody,\n    sql_insert_history_cancelled: sqlInsertHistory,\n    sql_update_queue_cancelled: sqlCancelQueue,\n  },\n}];"
+      },
+      "name": "Compoe Cancel Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://SEU_SUBDOMINIO_KOMMO.kommo.com' + '/api/v4/leads/' + $('Compoe Cancel Action').first().json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer SEU_ACCESS_TOKEN_KOMMO"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Compoe Cancel Action').first().json.patch_body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Patch Lead Cancel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -672,
+        784
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Cancel Action').first().json.sql_insert_history_cancelled }}",
+        "options": {}
+      },
+      "name": "Insert Rescue History - Cancelled",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -448,
+        784
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Cancel Action').first().json.sql_update_queue_cancelled }}",
+        "options": {}
+      },
+      "name": "Update Rescue Queue - Cancelled",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -224,
+        1008
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENCIAL_POSTGRES_ID",
+          "name": "CREDENCIAL_DO_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\n\nconst hour = now.getHours(); // 0-23\n\nconst isBusinessHours = hour >= 7 && hour < 21;\n\nreturn [{\n  json: {\n    ...$json,\n    current_hour: hour,\n    is_business_hours: isBusinessHours,\n    current_time: now.toISOString(),\n  }\n}];"
+      },
+      "name": "Code in JavaScript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3360,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.is_business_hours.toBoolean() }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "If",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -3136,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn $input.all();"
+      },
+      "name": "loop data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2320,
+        848
+      ],
+      "pinData": {}
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Valida Janela e Snapshot": {
+      "main": [
+        [
+          {
+            "node": "IF Pode Executar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Pode Executar": {
+      "main": [
+        [
+          {
+            "node": "Compoe Execution Action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF Deve Reagendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Deve Reagendar": {
+      "main": [
+        [
+          {
+            "node": "Compoe Reschedule Action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Compoe Cancel Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compoe Reschedule Action": {
+      "main": [
+        [
+          {
+            "node": "Insert Rescue History - Rescheduled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Rescue History - Rescheduled": {
+      "main": [
+        [
+          {
+            "node": "Update Rescue Queue - Rescheduled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Rescue Queue - Rescheduled": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron Busca Resgates": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bootstrap Tables": {
+      "main": [
+        [
+          {
+            "node": "Get Due Rescue Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Due Rescue Queue": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        [],
+        [
+          {
+            "node": "loop data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pega Lead do Kommo": {
+      "main": [
+        [
+          {
+            "node": "Pega Pipeline Statuses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pega Pipeline Statuses": {
+      "main": [
+        [
+          {
+            "node": "Reconstroi Estado Atual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconstroi Estado Atual": {
+      "main": [
+        [
+          {
+            "node": "Valida Janela e Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compoe Execution Action": {
+      "main": [
+        [
+          {
+            "node": "Patch Lead Execute",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patch Lead Execute": {
+      "main": [
+        [
+          {
+            "node": "Insert Rescue History - Dispatched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Rescue History - Dispatched": {
+      "main": [
+        [
+          {
+            "node": "Update Rescue Queue - Dispatched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Rescue Queue - Dispatched": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compoe Cancel Action": {
+      "main": [
+        [
+          {
+            "node": "Patch Lead Cancel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patch Lead Cancel": {
+      "main": [
+        [
+          {
+            "node": "Insert Rescue History - Cancelled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Rescue History - Cancelled": {
+      "main": [
+        [
+          {
+            "node": "Update Rescue Queue - Cancelled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Rescue Queue - Cancelled": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Bootstrap Tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "loop data": {
+      "main": [
+        [
+          {
+            "node": "Pega Lead do Kommo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "documentationFile": "docs/captarResgate.md",
+    "flowImage": "executa_resgate.jpg",
+    "securityNote": "Substitua todos os placeholders antes de ativar o fluxo."
+  },
+  "tags": []
+}
