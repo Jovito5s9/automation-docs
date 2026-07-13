@@ -1,0 +1,493 @@
+{
+  "name": "Kommo captar resgate - modelo censurado",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "resgate",
+        "options": {
+          "ignoreBots": false,
+          "rawBody": false
+        }
+      },
+      "name": "Kommo Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -4832,
+        -448
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.lead_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "IF Has Lead ID",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -4384,
+        -448
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{'https://SUBDOMINIO_DA_CONTA_KOMMO.kommo.com/api/v4/leads/' + $json.lead_id + '?with=contacts'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ACCESS_TOKEN_DO_KOMMO"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Pega Lead do Kommo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4160,
+        -448
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{'https://SUBDOMINIO_DA_CONTA_KOMMO.kommo.com/api/v4/leads/pipelines/' + $json.pipeline_id + '/statuses?with=descriptions'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ACCESS_TOKEN_DO_KOMMO"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Pega Pipeline Statuses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3936,
+        -448
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nfunction parseMaybeJson(value) {\n  if (!value) return {};\n\n  if (typeof value === 'string') {\n    try {\n      return JSON.parse(value);\n    } catch {\n      return {};\n    }\n  }\n\n  if (\n    typeof value === 'object' &&\n    value.data &&\n    typeof value.data === 'string'\n  ) {\n    try {\n      return JSON.parse(value.data);\n    } catch {\n      return value;\n    }\n  }\n\n  return value;\n}\n\nfunction extractTags(src) {\n  const raw = src?._embedded?.tags ?? src?.tags ?? [];\n  const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);\n  return list\n    .map((t) => normalizeText(t?.name ?? t?.title ?? t?.tag_name ?? t))\n    .filter(Boolean);\n}\n\nfunction hashString(input) {\n  let hash = 2166136261;\n  for (let i = 0; i < input.length; i++) {\n    hash ^= input.charCodeAt(i);\n    hash = Math.imul(hash, 16777619);\n  }\n  return (hash >>> 0).toString(16).padStart(8, '0');\n}\n\nfunction unixToIso(value) {\n  const n = Number(value);\n  if (!Number.isFinite(n) || n <= 0) return null;\n  return new Date(n * 1000).toISOString();\n}\n\nconst event = $items(\"Normaliza Webhook Payload1\")[0].json;\nconst webhookBody = $items(\"Kommo Webhook Trigger\")[0].json?.body ?? {};\n\nconst leadRaw = parseMaybeJson($items(\"Pega Lead do Kommo\")[0].json);\nconst statusesRaw = parseMaybeJson($items(\"Pega Pipeline Statuses\")[0].json);\n\nconst lead = leadRaw?.data && typeof leadRaw.data === 'object' ? leadRaw.data : leadRaw;\nconst statusesContainer = statusesRaw?.data && typeof statusesRaw.data === 'object' ? statusesRaw.data : statusesRaw;\nconst statuses = Array.isArray(statusesContainer)\n  ? statusesContainer\n  : statusesContainer?._embedded?.statuses ?? statusesContainer?.statuses ?? [];\n\nconst currentLeadId = Number(lead?.id ?? event.lead_id ?? 0) || null;\nconst currentPipelineId = Number(lead?.pipeline_id ?? event.pipeline_id ?? 0) || null;\nconst currentStatusId = Number(lead?.status_id ?? event.status_id ?? 0) || null;\n\nconst statusMatch = statuses.find((s) => Number(s?.id ?? s?.status_id ?? 0) === currentStatusId) ?? null;\nconst currentStageName = statusMatch?.name ?? lead?.status_name ?? event.trigger_stage_name ?? '';\n\nconst tags = extractTags(lead);\n\nconst closedLike = /vendid|vendido|fechad|perdid|cancelad|arquivad|encerrad/i.test(normalizeText(currentStageName));\nconst isClosed =\n  Boolean(lead?.is_deleted) ||\n  Boolean(lead?.closed_at) ||\n  closedLike;\n\nconst rawMessageId = webhookBody['message[add][0][id]'] ?? null;\nconst rawMessageCreatedAt = webhookBody['message[add][0][created_at]'] ?? null;\nconst rawMessageActorName = webhookBody['message[add][0][author][name]'] ?? null;\nconst rawMessageActorType = webhookBody['message[add][0][author][type]'] ?? null;\nconst rawMessageText = webhookBody['message[add][0][text]'] ?? null;\n\nconst lastMessageId = rawMessageId ? String(rawMessageId) : null;\nconst lastMessageAt = unixToIso(rawMessageCreatedAt);\nconst lastMessageActor = rawMessageActorName ?? rawMessageActorType ?? null;\nconst lastMessageHash = (lastMessageId || lastMessageAt || lastMessageActor || rawMessageText)\n  ? hashString([lastMessageId, lastMessageAt, lastMessageActor, rawMessageText].join('|'))\n  : null;\n\nreturn [{\n  json: {\n    phase: 'before_wait',\n    lead_id: currentLeadId,\n    lead_name: lead?.name ?? '',\n    pipeline_id: currentPipelineId,\n    current_status_id: currentStatusId,\n    current_stage_name: currentStageName,\n    snapshot_last_stage_name: currentStageName,\n    snapshot_last_status_id: currentStatusId,\n    trigger_status_id: event.status_id ?? null,\n    trigger_stage_name: event.trigger_stage_name ?? '',\n    event_type: event.event ?? event.event_type ?? 'unknown',\n    tags,\n    is_closed: isClosed,\n    closed_like: closedLike,\n    updated_at: lead?.updated_at ?? null,\n    pending_lock: null,\n    last_message_id: lastMessageId,\n    last_message_at: lastMessageAt,\n    last_message_actor: lastMessageActor,\n    last_message_hash: lastMessageHash,\n    lead_full: lead,\n    pipeline_statuses: statuses,\n    received_at: event.received_at ?? null,\n    raw_event: event.raw_event ?? null,\n  },\n}];"
+      },
+      "name": "Constroi Estado de Resgate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3712,
+        -448
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS public.rescue_queue (\n  queue_key TEXT PRIMARY KEY,\n  lead_id BIGINT NOT NULL,\n  pipeline_id BIGINT,\n  status_id BIGINT,\n  rescue_type TEXT NOT NULL,\n  rescue_label TEXT NOT NULL,\n  wait_hours INTEGER NOT NULL DEFAULT 24,\n  max_attempts INTEGER NOT NULL DEFAULT 2,\n  attempt INTEGER NOT NULL DEFAULT 0,\n  execute_at TIMESTAMPTZ,\n  not_before_at TIMESTAMPTZ,\n  status TEXT NOT NULL DEFAULT 'pending',\n  block_reason TEXT,\n  last_event_type TEXT,\n  last_stage_name TEXT,\n  snapshot_last_stage_name TEXT,\n  last_message_id TEXT,\n  last_message_at TIMESTAMPTZ,\n  last_message_actor TEXT,\n  last_message_hash TEXT,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS not_before_at TIMESTAMPTZ;\n\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS snapshot_last_stage_name TEXT;\n\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_id TEXT;\n\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;\n\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_actor TEXT;\n\nALTER TABLE public.rescue_queue\n  ADD COLUMN IF NOT EXISTS last_message_hash TEXT;\n\nCREATE INDEX IF NOT EXISTS idx_rescue_queue_status_execute_at\n  ON public.rescue_queue(status, execute_at);\n\nCREATE INDEX IF NOT EXISTS idx_rescue_queue_status_not_before_at\n  ON public.rescue_queue(status, not_before_at);\n\nCREATE INDEX IF NOT EXISTS idx_rescue_queue_lead_rescue\n  ON public.rescue_queue(lead_id, rescue_type, status_id);\n\nCREATE TABLE IF NOT EXISTS public.rescue_history (\n  id BIGSERIAL PRIMARY KEY,\n  queue_key TEXT NOT NULL,\n  lead_id BIGINT NOT NULL,\n  attempt INTEGER NOT NULL,\n  action TEXT NOT NULL,\n  result TEXT NOT NULL,\n  details TEXT,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_rescue_history_queue_key\n  ON public.rescue_history(queue_key);",
+        "options": {}
+      },
+      "name": "Bootstrap Tables",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -3488,
+        -448
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ID_DA_CREDENCIAL_POSTGRES",
+          "name": "NOME_DA_CREDENCIAL_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nconst state = $items(\"Constroi Estado de Resgate\")[0].json;\nconst tags = Array.isArray(state.tags) ? state.tags.map(normalizeText) : [];\nconst stage = normalizeText(state.current_stage_name);\nconst hasHuman = tags.some((t) => t.includes('atendimento_humano') || t.includes('humano') || t.includes('consultora'));\nconst hasPending = tags.some((t) => t.includes('resgate_pendente') || t.includes('resgate_em_execucao') || t.includes('resgate_cancelado'));\nconst closedLike = Boolean(state.is_closed) || /vendid|vendido|fechad|perdid|cancelad|arquivad|encerrad/i.test(stage);\n\nconst rules = [\n  { key: 'consulta', label: 'consulta', keywords: ['consulta', 'agendamento', 'agenda', 'medica', 'médica'], wait_hours: 24, max_attempts: 2 },\n  { key: 'orcamento', label: 'orçamento', keywords: ['orcamento', 'orçamento', 'proposta', 'cotacao', 'cotação', 'valor'], wait_hours: 72, max_attempts: 3 },\n  { key: 'crediario', label: 'crediário', keywords: ['crediario', 'crediário', 'parcel', 'document', 'credito', 'crédito'], wait_hours: 48, max_attempts: 2 },\n  { key: 'duvidas', label: 'dúvidas', keywords: ['duvida', 'duvidas', 'dúvida', 'dúvidas', 'faq', 'informacao', 'informação'], wait_hours: 24, max_attempts: 2 },\n];\n\nconst matchedRule = rules.find((rule) => rule.keywords.some((k) => stage.includes(normalizeText(k)))) ?? null;\n\nlet should_rescue = false;\nlet block_reason = null;\nlet rescue_type = null;\nlet rescue_label = null;\nlet wait_hours = 0;\nlet max_attempts = 1;\n\nif (!state.lead_id) {\n  block_reason = 'missing_lead_id';\n} else if (closedLike) {\n  block_reason = 'closed';\n} else if (!stage) {\n  block_reason = 'stage_not_available';\n} else if (hasHuman) {\n  block_reason = 'human_handling';\n} else if (hasPending) {\n  block_reason = 'already_pending_or_running';\n} else if (!matchedRule) {\n  block_reason = 'stage_not_eligible';\n} else {\n  should_rescue = true;\n  rescue_type = matchedRule.key;\n  rescue_label = matchedRule.label;\n  wait_hours = matchedRule.wait_hours;\n  max_attempts = matchedRule.max_attempts;\n}\n\nreturn [{\n  json: {\n    ...state,\n    should_rescue,\n    block_reason,\n    rescue_type,\n    rescue_label,\n    wait_hours,\n    max_attempts,\n    matched_rule: matchedRule,\n  },\n}];"
+      },
+      "name": "Avalia Resgate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3264,
+        -448
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.should_rescue }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "IF Precisa de Resgate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -3040,
+        -448
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function normalizeText(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n}\n\nfunction sqlText(value) {\n  if (value === null || value === undefined || value === '') return 'NULL';\n  return `'${String(value).replace(/'/g, \"''\")}'`;\n}\n\nfunction sqlNumber(value) {\n  const n = Number(value);\n  return Number.isFinite(n) ? String(n) : 'NULL';\n}\n\nfunction toIso(value) {\n  if (!value) return null;\n  const d = new Date(value);\n  return Number.isFinite(d.getTime()) ? d.toISOString() : null;\n}\n\nconst state = $json;\n\nconst leadId = Number(state.lead_id);\nconst pipelineId = Number(state.pipeline_id);\nconst statusId = Number(state.current_status_id);\n\nif (!Number.isFinite(leadId)) {\n  throw new Error('lead_id inválido no Compoe Fila de Resgate');\n}\n\nconst rescueType = normalizeText(state.rescue_type || 'general')\n  .replace(/[^a-z0-9]+/g, '_')\n  .replace(/^_|_$/g, '') || 'general';\n\nconst rescueTypeUpper = rescueType.toUpperCase();\nconst waitHours = Math.max(1, Number(state.wait_hours || 1));\nconst maxAttempts = Math.max(1, Number(state.max_attempts || 1));\n\nconst queueKey = `${leadId}:${rescueType}:${Number.isFinite(statusId) ? statusId : 'null'}`;\n\nconst executeAtDate = new Date(Date.now() + waitHours * 60 * 60 * 1000);\nconst lastMessageAtDate = state.last_message_at ? new Date(state.last_message_at) : null;\n\nconst minMessageWindowDate = lastMessageAtDate\n  ? new Date(lastMessageAtDate.getTime() + 72 * 60 * 60 * 1000)\n  : executeAtDate;\n\nconst notBeforeAtDate = new Date(\n  Math.max(executeAtDate.getTime(), minMessageWindowDate.getTime())\n);\n\nconst executeAt = executeAtDate.toISOString();\nconst notBeforeAt = notBeforeAtDate.toISOString();\n\nconst patchBody = {\n  updated_by: 0,\n  tags_to_add: [\n    { name: 'RESGATE_PENDENTE' },\n    { name: `RESGATE_PENDENTE_${rescueTypeUpper}` },\n  ],\n  tags_to_delete: [],\n};\n\nconst sqlUpsertQueue = `\nINSERT INTO public.rescue_queue (\n  queue_key,\n  lead_id,\n  pipeline_id,\n  status_id,\n  rescue_type,\n  rescue_label,\n  wait_hours,\n  max_attempts,\n  attempt,\n  execute_at,\n  not_before_at,\n  status,\n  block_reason,\n  last_event_type,\n  last_stage_name,\n  snapshot_last_stage_name,\n  last_message_id,\n  last_message_at,\n  last_message_actor,\n  last_message_hash,\n  created_at,\n  updated_at\n) VALUES (\n  ${sqlText(queueKey)},\n  ${sqlNumber(leadId)},\n  ${sqlNumber(pipelineId)},\n  ${sqlNumber(statusId)},\n  ${sqlText(rescueType)},\n  ${sqlText(state.rescue_label || rescueType)},\n  ${sqlNumber(waitHours)},\n  ${sqlNumber(maxAttempts)},\n  0,\n  ${sqlText(executeAt)}::timestamptz,\n  ${sqlText(notBeforeAt)}::timestamptz,\n  'pending',\n  NULL,\n  ${sqlText(state.event_type || 'unknown')},\n  ${sqlText(state.current_stage_name || '')},\n  ${sqlText(state.snapshot_last_stage_name || state.current_stage_name || '')},\n  ${sqlText(state.last_message_id)},\n  ${state.last_message_at ? `${sqlText(state.last_message_at)}::timestamptz` : 'NULL'},\n  ${sqlText(state.last_message_actor)},\n  ${sqlText(state.last_message_hash)},\n  NOW(),\n  NOW()\n)\nON CONFLICT (queue_key) DO UPDATE SET\n  lead_id = EXCLUDED.lead_id,\n  pipeline_id = EXCLUDED.pipeline_id,\n  status_id = EXCLUDED.status_id,\n  rescue_type = EXCLUDED.rescue_type,\n  rescue_label = EXCLUDED.rescue_label,\n  wait_hours = EXCLUDED.wait_hours,\n  max_attempts = EXCLUDED.max_attempts,\n  attempt = EXCLUDED.attempt,\n  execute_at = EXCLUDED.execute_at,\n  not_before_at = EXCLUDED.not_before_at,\n  status = EXCLUDED.status,\n  block_reason = EXCLUDED.block_reason,\n  last_event_type = EXCLUDED.last_event_type,\n  last_stage_name = EXCLUDED.last_stage_name,\n  snapshot_last_stage_name = EXCLUDED.snapshot_last_stage_name,\n  last_message_id = EXCLUDED.last_message_id,\n  last_message_at = EXCLUDED.last_message_at,\n  last_message_actor = EXCLUDED.last_message_actor,\n  last_message_hash = EXCLUDED.last_message_hash,\n  updated_at = NOW();\n`.trim();\n\nconst sqlInsertHistoryQueued = `\nINSERT INTO public.rescue_history (\n  queue_key,\n  lead_id,\n  attempt,\n  action,\n  result,\n  details,\n  created_at\n) VALUES (\n  ${sqlText(queueKey)},\n  ${sqlNumber(leadId)},\n  0,\n  'queued',\n  'pending',\n  ${sqlText(\n    `agendado_para=${executeAt} | not_before_at=${notBeforeAt} | wait_hours=${waitHours} | rescue_type=${rescueType} | last_message_at=${state.last_message_at || 'null'} | last_message_actor=${state.last_message_actor || 'null'}`\n  )},\n  NOW()\n);\n`.trim();\n\nreturn [{\n  json: {\n    ...state,\n    queue_key: queueKey,\n    attempt: 0,\n    execute_at: executeAt,\n    not_before_at: notBeforeAt,\n    status: 'pending',\n    patch_body: patchBody,\n    sql_upsert_queue: sqlUpsertQueue,\n    sql_insert_history_queued: sqlInsertHistoryQueued,\n  },\n}];"
+      },
+      "name": "Compoe Fila de Resgate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2816,
+        -544
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Fila de Resgate').first().json.sql_upsert_queue }}",
+        "options": {}
+      },
+      "name": "Upsert Rescue Queue",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2592,
+        -544
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ID_DA_CREDENCIAL_POSTGRES",
+          "name": "NOME_DA_CREDENCIAL_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe Fila de Resgate').first().json.sql_insert_history_queued }}",
+        "options": {}
+      },
+      "name": "Insert Rescue History - Queued",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2368,
+        -544
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ID_DA_CREDENCIAL_POSTGRES",
+          "name": "NOME_DA_CREDENCIAL_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ ($env.KOMMO_BASE_URL || 'https://SUBDOMINIO_DA_CONTA_KOMMO.amocrm.com') + '/api/v4/leads/' + $('Compoe Fila de Resgate').first().json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ACCESS_TOKEN_DO_KOMMO"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Compoe Fila de Resgate').first().json.patch_body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Patch Lead Hold",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2144,
+        -544
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "function sqlText(value) {\n  if (value === null || value === undefined) return 'NULL';\n  return `'${String(value).replace(/'/g, \"''\")}'`;\n}\n\nconst state = $json;\nconst queueKey = `${state.lead_id || 'unknown'}:${state.rescue_type || 'general'}:${state.current_status_id || 'na'}`;\n\nconst sqlInsertHistorySkipped = `\nINSERT INTO public.rescue_history (\n  queue_key, lead_id, attempt, action, result, details, created_at\n) VALUES (\n  ${sqlText(queueKey)},\n  ${state.lead_id === null || state.lead_id === undefined ? '0' : Number(state.lead_id)},\n  0,\n  'skip',\n  'blocked',\n  ${sqlText(state.block_reason || 'not_eligible')},\n  NOW()\n);\n`.trim();\n\nreturn [{\n  json: {\n    ...state,\n    queue_key: queueKey,\n    sql_insert_history_skipped: sqlInsertHistorySkipped,\n  },\n}];"
+      },
+      "name": "Compoe History Skip",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2816,
+        -352
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Compoe History Skip').first().json.sql_insert_history_skipped }}",
+        "options": {}
+      },
+      "name": "Insert Rescue History - Skipped",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2592,
+        -352
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ID_DA_CREDENCIAL_POSTGRES",
+          "name": "NOME_DA_CREDENCIAL_POSTGRES"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body ?? {};\n\nconst get = (key) => {\n  const value = body[key];\n  return value === undefined || value === null || value === '' ? null : value;\n};\n\nconst toNumber = (value) => {\n  const n = Number(value);\n  return Number.isFinite(n) ? n : null;\n};\n\nlet output = {\n  event: null,\n  lead_id: null,\n  contact_id: null,\n  pipeline_id: null,\n  status_id: null,\n  old_status_id: null,\n  raw_event: null,\n};\n\nif (get('message[add][0][entity_id]') !== null) {\n  output.event = 'message';\n  output.raw_event = 'message[add]';\n  output.lead_id = toNumber(get('message[add][0][entity_id]'));\n  output.contact_id = toNumber(get('message[add][0][contact_id]'));\n}\nelse if (get('leads[status][0][id]') !== null) {\n  output.event = 'lead_status';\n  output.raw_event = 'leads[status]';\n  output.lead_id = toNumber(get('leads[status][0][id]'));\n  output.pipeline_id = toNumber(get('leads[status][0][pipeline_id]'));\n  output.status_id = toNumber(get('leads[status][0][status_id]'));\n  output.old_status_id = toNumber(get('leads[status][0][old_status_id]'));\n}\nelse if (get('leads[add][0][id]') !== null) {\n  output.event = 'lead_add';\n  output.raw_event = 'leads[add]';\n  output.lead_id = toNumber(get('leads[add][0][id]'));\n  output.pipeline_id = toNumber(get('leads[add][0][pipeline_id]'));\n  output.status_id = toNumber(get('leads[add][0][status_id]'));\n}\nelse if (get('leads[update][0][id]') !== null) {\n  output.event = 'lead_update';\n  output.raw_event = 'leads[update]';\n  output.lead_id = toNumber(get('leads[update][0][id]'));\n  output.pipeline_id = toNumber(get('leads[update][0][pipeline_id]'));\n  output.status_id = toNumber(get('leads[update][0][status_id]'));\n}\nelse if (get('contacts[add][0][id]') !== null) {\n  output.event = 'contact_add';\n  output.raw_event = 'contacts[add]';\n  output.contact_id = toNumber(get('contacts[add][0][id]'));\n}\nelse if (get('contacts[update][0][id]') !== null) {\n  output.event = 'contact_update';\n  output.raw_event = 'contacts[update]';\n  output.contact_id = toNumber(get('contacts[update][0][id]'));\n}\n\nreturn [{ json: output }];"
+      },
+      "name": "Normaliza Webhook Payload1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4608,
+        -448
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Kommo Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normaliza Webhook Payload1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Has Lead ID": {
+      "main": [
+        [
+          {
+            "node": "Pega Lead do Kommo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pega Lead do Kommo": {
+      "main": [
+        [
+          {
+            "node": "Pega Pipeline Statuses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pega Pipeline Statuses": {
+      "main": [
+        [
+          {
+            "node": "Constroi Estado de Resgate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Constroi Estado de Resgate": {
+      "main": [
+        [
+          {
+            "node": "Bootstrap Tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bootstrap Tables": {
+      "main": [
+        [
+          {
+            "node": "Avalia Resgate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Avalia Resgate": {
+      "main": [
+        [
+          {
+            "node": "IF Precisa de Resgate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Precisa de Resgate": {
+      "main": [
+        [
+          {
+            "node": "Compoe Fila de Resgate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Compoe History Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compoe Fila de Resgate": {
+      "main": [
+        [
+          {
+            "node": "Upsert Rescue Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Rescue Queue": {
+      "main": [
+        [
+          {
+            "node": "Insert Rescue History - Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Rescue History - Queued": {
+      "main": [
+        [
+          {
+            "node": "Patch Lead Hold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compoe History Skip": {
+      "main": [
+        [
+          {
+            "node": "Insert Rescue History - Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normaliza Webhook Payload1": {
+      "main": [
+        [
+          {
+            "node": "IF Has Lead ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
